@@ -346,7 +346,22 @@ thread_foreach (thread_action_func *func, void *aux)
 void
 thread_set_priority (int new_priority) 
 {
-  thread_current ()->priority = new_priority;
+  struct thread* cur_thread;
+  cur_thread = thread_current ();
+
+  if (thread_mlfqs)
+    return;
+
+  if (!cur_thread->donated)
+    cur_thread->priority = cur_thread->old_priority = new_priority;
+  else
+    {
+      if (cur_thread->priority < new_priority)
+        cur_thread->priority = new_priority;
+      else
+        cur_thread->old_priority = new_priority;
+    }
+
   thread_yield ();
 }
 
@@ -477,6 +492,11 @@ init_thread (struct thread *t, const char *name, int priority)
 
   /*Initialize the blocked time*/
   t->ticks_blocked = 0;
+
+  t->old_priority = priority;
+  list_init (&(t->locks));
+  t->donated = false;
+  t->blocked = 0;
 }
 
 /* Allocates a SIZE-byte frame at the top of thread T's stack and

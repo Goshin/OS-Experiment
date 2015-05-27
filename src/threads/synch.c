@@ -32,6 +32,9 @@
 #include "threads/interrupt.h"
 #include "threads/thread.h"
 
+static bool lock_cmp (const struct list_elem *, const struct list_elem *, void *aux);
+static bool thread_priority_cmp (const struct list_elem *, const struct list_elem *, void *aux);
+
 /* Initializes semaphore SEMA to VALUE.  A semaphore is a
    nonnegative integer along with two atomic operators for
    manipulating it:
@@ -68,7 +71,7 @@ sema_down (struct semaphore *sema)
   old_level = intr_disable ();
   while (sema->value == 0) 
     {
-      list_push_back (&sema->waiters, &thread_current ()->elem);
+      list_insert_ordered (&sema->waiters, &thread_current ()->elem, thread_priority_cmp, NULL);
       thread_block ();
     }
   sema->value--;
@@ -113,10 +116,16 @@ sema_up (struct semaphore *sema)
   ASSERT (sema != NULL);
 
   old_level = intr_disable ();
+  struct thread *temp = NULL;
   if (!list_empty (&sema->waiters)) 
-    thread_unblock (list_entry (list_pop_front (&sema->waiters),
-                                struct thread, elem));
+    {
+      list_sort (&sema->waiters, thread_priority_cmp, NULL);    
+      temp = list_entry (list_pop_front (&sema->waiters), struct thread, elem);
+      thread_unblock (temp);
+    }
   sema->value++;
+  if (temp != NULL && temp->priority > thread_current()->priority)
+    thread_yield();
   intr_set_level (old_level);
 }
 
@@ -179,6 +188,7 @@ lock_init (struct lock *lock)
 
   lock->holder = NULL;
   sema_init (&lock->semaphore, 1);
+  lock->lock_priority = 0;
 }
 
 /* Acquires LOCK, sleeping until it becomes available if
@@ -196,8 +206,40 @@ lock_acquire (struct lock *lock)
   ASSERT (!intr_context ());
   ASSERT (!lock_held_by_current_thread (lock));
 
+  struct thread *thrd;
+  struct thread *curr;
+  struct lock *another;
+  enum intr_level old_level;
+  old_level = intr_disable ();
+
+  curr = thread_current () ;
+  thrd = lock->holder;
+  curr->blocked = another = lock;
+
+  while(thrd != NULL && thrd->priority < curr->priority) 
+    {
+      thrd->donated = true;
+      thrd->priority = curr->priority;
+      if (another->lock_priority < curr->priority)
+        {
+           another->lock_priority = curr->priority;
+           list_remove (&another->holder_elem);
+           list_insert_ordered (&thrd->locks, &another->holder_elem, lock_cmp, NULL);
+        }
+      if (thrd->status == THREAD_BLOCKED && thrd->blocked != NULL)
+        {
+           another = thrd->blocked;
+           thrd = thrd->blocked->holder; 
+        }
+      else
+        break;
+     }
+
   sema_down (&lock->semaphore);
   lock->holder = thread_current ();
+  lock->lock_priority = curr->priority;
+  list_insert_ordered (&curr->locks, &lock->holder_elem, lock_cmp, NULL);
+  intr_set_level (old_level);
 }
 
 /* Tries to acquires LOCK and returns true if successful or false
@@ -231,8 +273,30 @@ lock_release (struct lock *lock)
   ASSERT (lock != NULL);
   ASSERT (lock_held_by_current_thread (lock));
 
+  struct thread *curr;
+  struct list_elem *l;
+  struct lock *another;
+  enum intr_level old_level;
+  old_level = intr_disable ();
+  curr = thread_current ();
   lock->holder = NULL;
+  list_remove (&lock->holder_elem);
+  lock->lock_priority = 0; 
   sema_up (&lock->semaphore);
+  if (list_empty (&curr->locks))
+    {
+      curr->donated = false;
+      thread_set_priority (curr->old_priority);
+    } 
+  else
+    {
+       l = list_front (&curr->locks);
+       another = list_entry (l, struct lock, holder_elem);
+       curr->priority = another->lock_priority;
+       thread_yield ();
+    }
+
+  intr_set_level (old_level);
 }
 
 /* Returns true if the current thread holds LOCK, false
@@ -336,3 +400,16 @@ cond_broadcast (struct condition *cond, struct lock *lock)
   while (!list_empty (&cond->waiters))
     cond_signal (cond, lock);
 }
+
+static bool
+lock_cmp (const struct list_elem *a, const struct list_elem *b, void *aux)
+{
+  return list_entry (a, struct lock, holder_elem)->lock_priority > list_entry (b, struct lock, holder_elem)->lock_priority;
+}
+
+
+static bool
+thread_priority_cmp (const struct list_elem *a, const struct list_elem *b, void *aux)
+{
+  return list_entry (a, struct thread, elem)->priority > list_entry (b, struct thread, elem)->priority;
+ }

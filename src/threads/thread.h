@@ -103,6 +103,11 @@ struct thread
 
     /*Time to kepp sleeping*/
     int64_t ticks_blocked;
+
+    int old_priority;
+    struct list locks;
+    bool donated;
+    struct lock* blocked;
   };
 
 /* If false (default), use round-robin scheduler.

@@ -11,6 +11,9 @@
 #include "threads/switch.h"
 #include "threads/synch.h"
 #include "threads/vaddr.h"
+
+#include "threads/fixed_point.h"
+
 #ifdef USERPROG
 #include "userprog/process.h"
 #endif
@@ -58,6 +61,7 @@ static unsigned thread_ticks;   /* # of timer ticks since last yield. */
    If true, use multi-level feedback queue scheduler.
    Controlled by kernel command-line option "-o mlfqs". */
 bool thread_mlfqs;
+static int64_t load_avg;
 
 static void kernel_thread (thread_func *, void *aux);
 
@@ -72,6 +76,13 @@ void thread_schedule_tail (struct thread *prev);
 static tid_t allocate_tid (void);
 
 static bool thread_priority_compare (const struct list_elem *, const struct list_elem *, void *aux); 
+
+void renew_priority (struct thread*);
+void renew_all_priority (void);
+void thread_all_renew (void);
+int64_t get_ready_threads (void);
+void renew_load_avg (void);
+void renew_recent_cpu (struct thread *);
 
 /* Initializes the threading system by transforming the code
    that's currently running into a thread.  This can't work in
@@ -136,6 +147,22 @@ thread_tick (void)
   else
     kernel_ticks++;
 
+  if (thread_mlfqs)
+    {
+      /* Update CPU usage statistics */
+      if (thread_current () != idle_thread)
+        t->recent_cpu = FLOAT_ADD_INT (t->recent_cpu, 1);
+      /* Update load avg */
+      if (timer_ticks () % 100 == 0)
+        {
+          renew_load_avg ();
+          thread_all_renew ();
+        }
+      /* Update priority */
+      if (timer_ticks () % 4 == 0)
+        renew_priority (t);
+    }
+
   /* Enforce preemption. */
   if (++thread_ticks >= TIME_SLICE)
     intr_yield_on_return ();
@@ -184,6 +211,11 @@ thread_create (const char *name, int priority,
 
   /* Initialize thread. */
   init_thread (t, name, priority);
+
+  /* initialize mlfqs priority */
+  if (thread_mlfqs)
+    renew_priority (t);
+
   tid = t->tid = allocate_tid ();
 
   /* Prepare thread for first run by initializing its stack.
@@ -376,31 +408,28 @@ thread_get_priority (void)
 void
 thread_set_nice (int nice UNUSED) 
 {
-  /* Not yet implemented. */
+  thread_current ()->nice = nice;
 }
 
 /* Returns the current thread's nice value. */
 int
 thread_get_nice (void) 
 {
-  /* Not yet implemented. */
-  return 0;
+  return thread_current ()->priority;
 }
 
 /* Returns 100 times the system load average. */
 int
 thread_get_load_avg (void) 
 {
-  /* Not yet implemented. */
-  return 0;
+  return FLOAT_TO_INT_NEAR (load_avg * 100);
 }
 
 /* Returns 100 times the current thread's recent_cpu value. */
 int
 thread_get_recent_cpu (void) 
 {
-  /* Not yet implemented. */
-  return 0;
+  return FLOAT_TO_INT_NEAR (thread_current ()->recent_cpu * 100);
 }
 
 /* Idle thread.  Executes when no other thread is ready to run.
@@ -497,6 +526,9 @@ init_thread (struct thread *t, const char *name, int priority)
   list_init (&(t->locks));
   t->donated = false;
   t->blocked = 0;
+
+  t->nice = 0;
+  t->recent_cpu = 0;
 }
 
 /* Allocates a SIZE-byte frame at the top of thread T's stack and
@@ -617,4 +649,79 @@ static bool
 thread_priority_compare (const struct list_elem *a, const struct list_elem *b, void *aux) 
 {
   return list_entry(a, struct thread, elem)->priority > list_entry(b, struct thread, elem)->priority;
+}
+
+void 
+renew_priority (struct thread* t)
+{
+  int f = INT_TO_FLOAT (PRI_MAX);
+  int div = FLOAT_DIV (t->recent_cpu, INT_TO_FLOAT (4));
+  int mul = FLOAT_MUL (INT_TO_FLOAT (t->nice),INT_TO_FLOAT (2));
+  int result = FLOAT_TO_INT_NEAR (f - div - mul);
+
+  if (result < PRI_MIN)
+    result = PRI_MIN;
+  else if (result > PRI_MAX)
+    result = PRI_MAX;
+
+  t->priority = result;
+
+}
+
+void
+renew_all_priority (void)
+{
+  /* Update the priority in the list */
+  struct list_elem *elem;
+  for (elem = list_begin (&all_list); elem != list_end (&all_list); elem = list_next (elem))
+    {
+      struct thread* t = list_entry (elem, struct thread, allelem);
+      if (t != idle_thread)
+        renew_priority (t);
+    }
+    
+  /* Keep ordered */
+  list_sort(&ready_list, thread_priority_compare, NULL);
+
+}
+
+void
+thread_all_renew (void)
+{
+  /* Update the recent cpu usage in the list */
+  struct list_elem *elem;
+  for (elem = list_begin (&all_list); elem != list_end (&all_list); elem = list_next (elem))
+    {
+      struct thread* t = list_entry (elem, struct thread, allelem);
+      renew_recent_cpu (t);
+      renew_priority (t);
+    }
+
+}
+
+int64_t
+get_ready_threads (void)
+{
+  if (thread_current () != idle_thread)
+    return list_size (&ready_list) + 1;
+  else
+    return list_size (&ready_list);
+}
+
+void
+renew_load_avg (void)
+{
+  int a = FLOAT_MUL (FLOAT_DIV (INT_TO_FLOAT (59), INT_TO_FLOAT (60)), load_avg);
+  int temp = get_ready_threads ();
+  int b = FLOAT_DIV (INT_TO_FLOAT (1), INT_TO_FLOAT (60)) * temp;
+  load_avg = a + b;
+}
+
+void
+renew_recent_cpu (struct thread* t)
+{
+  int ans;
+  ans = FLOAT_DIV (2 * load_avg, FLOAT_ADD_INT (2 * load_avg, 1));
+  ans = FLOAT_MUL (ans, t->recent_cpu);
+  t->recent_cpu = FLOAT_ADD_INT (ans, t->nice);
 }

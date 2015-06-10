@@ -108,6 +108,9 @@ struct thread
     struct list locks;
     bool donated;
     struct lock* blocked;
+
+    int32_t nice;
+    int64_t recent_cpu;
   };
 
 /* If false (default), use round-robin scheduler.
